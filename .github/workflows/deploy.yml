@@ -1,0 +1,147 @@
+name: Deploy Hotel PII Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lambda_function/**'
+      - 'terraform/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      image_only:
+        description: 'Skip Terraform, only rebuild image'
+        type: boolean
+        default: false
+      environment:
+        description: 'Target environment'
+        type: choice
+        options: [prod, staging]
+        default: prod
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'prod' }}
+  cancel-in-progress: false   # never cancel a deploy mid-flight
+
+env:
+  AWS_REGION: us-east-2
+  ENV: ${{ github.event.inputs.environment || 'prod' }}
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag (git short SHA)
+        id: tag
+        run: echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Bootstrap: ensure ECR + KMS exist before pushing the image ──────────
+      - name: Terraform init
+        if: ${{ github.event.inputs.image_only != 'true' }}
+        working-directory: terraform
+        run: terraform init -input=false -upgrade
+
+      - name: Terraform bootstrap (KMS + ECR only)
+        if: ${{ github.event.inputs.image_only != 'true' }}
+        working-directory: terraform
+        run: |
+          terraform apply -input=false -auto-approve \
+            -target=aws_kms_key.main \
+            -target=aws_kms_alias.main \
+            -target=aws_ecr_repository.lambda_repo \
+            -target=aws_ecr_lifecycle_policy.lambda_repo \
+            -var="aws_region=${AWS_REGION}" \
+            -var="environment=${ENV}" \
+            -var="image_tag=${IMAGE_TAG}"
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+
+      - name: Read ECR repo URL
+        id: ecr
+        working-directory: terraform
+        run: |
+          terraform init -input=false -reconfigure
+          echo "url=$(terraform output -raw ecr_repo_url)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: lambda_function
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.url }}:${{ steps.tag.outputs.IMAGE_TAG }}
+          provenance: false
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            IMAGE_TAG=${{ steps.tag.outputs.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Full Terraform apply (image now exists in ECR) ─────────────────────
+      - name: Terraform apply (full)
+        if: ${{ github.event.inputs.image_only != 'true' }}
+        working-directory: terraform
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="aws_region=${AWS_REGION}" \
+            -var="environment=${ENV}" \
+            -var="image_tag=${IMAGE_TAG}"
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+
+      # ── Always push the new image to the live function ─────────────────────
+      - name: Update Lambda function code
+        run: |
+          aws lambda update-function-code \
+            --function-name "gg-encryptionservice" \
+            --image-uri "${ECR_URL}:${IMAGE_TAG}" \
+            --region "${AWS_REGION}" \
+            --no-cli-pager
+          aws lambda wait function-updated \
+            --function-name "gg-encryptionservice" \
+            --region "${AWS_REGION}"
+        env:
+          ECR_URL: ${{ steps.ecr.outputs.url }}
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## Deployment complete"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${ENV}\` |"
+            echo "| Region | \`${AWS_REGION}\` |"
+            echo "| Image tag | \`${IMAGE_TAG}\` |"
+            echo "| Function | \`gg-encryptionservice\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
