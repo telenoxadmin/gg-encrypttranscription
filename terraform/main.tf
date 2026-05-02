@@ -132,19 +132,17 @@ resource "aws_kms_alias" "main" {
 # ════════════════════════════════════════════════════════════
 
 # ── INPUT BUCKET ─────────────────────────────────────────────
-resource "aws_s3_bucket" "input" {
-  bucket        = "${local.prefix}-input"
-  force_destroy = false
-  tags          = local.tags
+data "aws_s3_bucket" "input" {
+  bucket = "${local.prefix}-input"
 }
 
 resource "aws_s3_bucket_versioning" "input" {
-  bucket = aws_s3_bucket.input.id
+  bucket = data.aws_s3_bucket.input.id
   versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "input" {
-  bucket = aws_s3_bucket.input.id
+  bucket = data.aws_s3_bucket.input.id
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
@@ -155,7 +153,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "input" {
 }
 
 resource "aws_s3_bucket_public_access_block" "input" {
-  bucket                  = aws_s3_bucket.input.id
+  bucket                  = data.aws_s3_bucket.input.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -163,14 +161,12 @@ resource "aws_s3_bucket_public_access_block" "input" {
 }
 
 # ── OUTPUT BUCKET ─────────────────────────────────────────────
-resource "aws_s3_bucket" "output" {
-  bucket        = "gg-transcriptions-en"
-  force_destroy = false
-  tags          = local.tags
+data "aws_s3_bucket" "output" {
+  bucket = "gg-transcriptions-en"
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "output" {
-  bucket = aws_s3_bucket.output.id
+  bucket = data.aws_s3_bucket.output.id
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
@@ -181,7 +177,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "output" {
 }
 
 resource "aws_s3_bucket_public_access_block" "output" {
-  bucket                  = aws_s3_bucket.output.id
+  bucket                  = data.aws_s3_bucket.output.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -189,14 +185,12 @@ resource "aws_s3_bucket_public_access_block" "output" {
 }
 
 # ── TOKEN MAP BUCKET  (most sensitive — separate from redacted files) ─────────
-resource "aws_s3_bucket" "token_map" {
-  bucket        = "gg-convertmap"
-  force_destroy = false
-  tags          = merge(local.tags, { Sensitivity = "high" })
+data "aws_s3_bucket" "token_map" {
+  bucket = "gg-convert-map"
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "token_map" {
-  bucket = aws_s3_bucket.token_map.id
+  bucket = data.aws_s3_bucket.token_map.id
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
@@ -207,7 +201,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "token_map" {
 }
 
 resource "aws_s3_bucket_public_access_block" "token_map" {
-  bucket                  = aws_s3_bucket.token_map.id
+  bucket                  = data.aws_s3_bucket.token_map.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -399,15 +393,15 @@ data "aws_iam_policy_document" "lambda_permissions" {
   statement {
     sid       = "ReadInput"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.input.arn}/*"]
+    resources = ["${data.aws_s3_bucket.input.arn}/*"]
   }
   # Write redacted outputs (no PutObjectAcl)
   statement {
     sid       = "WriteOutput"
     actions   = ["s3:PutObject"]
     resources = [
-      "${aws_s3_bucket.output.arn}/*",
-      "${aws_s3_bucket.token_map.arn}/*",
+      "${data.aws_s3_bucket.output.arn}/*",
+      "${data.aws_s3_bucket.token_map.arn}/*",
     ]
   }
   # Idempotency check — HeadObject is authorized by s3:GetObject (no separate action exists).
@@ -416,8 +410,8 @@ data "aws_iam_policy_document" "lambda_permissions" {
     sid     = "HeadOutput"
     actions = ["s3:GetObject"]
     resources = [
-      "${aws_s3_bucket.output.arn}/*",
-      "${aws_s3_bucket.token_map.arn}/*",
+      "${data.aws_s3_bucket.output.arn}/*",
+      "${data.aws_s3_bucket.token_map.arn}/*",
     ]
   }
   # KMS for encrypt/decrypt
@@ -493,8 +487,8 @@ resource "aws_lambda_function" "redactor" {
 
   environment {
     variables = {
-      OUTPUT_BUCKET        = aws_s3_bucket.output.bucket
-      TOKEN_MAP_BUCKET     = aws_s3_bucket.token_map.bucket
+      OUTPUT_BUCKET        = data.aws_s3_bucket.output.bucket
+      TOKEN_MAP_BUCKET     = data.aws_s3_bucket.token_map.bucket
       MODE                 = var.mode
       CONFIDENCE_THRESHOLD = var.confidence
       MAX_FILE_MB          = var.max_file_mb
@@ -582,11 +576,11 @@ resource "aws_lambda_permission" "s3_invoke" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.redactor.function_name
   principal     = "s3.amazonaws.com"
-  source_arn    = aws_s3_bucket.input.arn
+  source_arn    = data.aws_s3_bucket.input.arn
 }
 
 resource "aws_s3_bucket_notification" "input_trigger" {
-  bucket = aws_s3_bucket.input.id
+  bucket = data.aws_s3_bucket.input.id
   lambda_function {
     lambda_function_arn = aws_lambda_function.redactor.arn
     events              = ["s3:ObjectCreated:*"]
@@ -599,9 +593,9 @@ resource "aws_s3_bucket_notification" "input_trigger" {
 #  OUTPUTS
 # ════════════════════════════════════════════════════════════
 
-output "input_bucket"      { value = aws_s3_bucket.input.bucket }
-output "output_bucket"     { value = aws_s3_bucket.output.bucket }
-output "token_map_bucket"  { value = aws_s3_bucket.token_map.bucket }
+output "input_bucket"      { value = data.aws_s3_bucket.input.bucket }
+output "output_bucket"     { value = data.aws_s3_bucket.output.bucket }
+output "token_map_bucket"  { value = data.aws_s3_bucket.token_map.bucket }
 output "ecr_repo_url"      { value = aws_ecr_repository.lambda_repo.repository_url }
 output "lambda_function"   { value = aws_lambda_function.redactor.function_name }
 output "dlq_url"           { value = aws_sqs_queue.dlq.url }
