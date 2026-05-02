@@ -28,9 +28,9 @@ terraform {
   #     --key-schema AttributeName=LockID,KeyType=HASH \
   #     --billing-mode PAY_PER_REQUEST
   backend "s3" {
-    bucket         = "your-company-terraform-state"   # CHANGE THIS
-    key            = "hotel-pii-redaction/terraform.tfstate"
-    region         = "us-east-1"
+    bucket         = "gg-lambda-deployments"
+    key            = "gg-encryptionservice/terraform.tfstate"
+    region         = "us-east-2"
     dynamodb_table = "terraform-locks"
     encrypt        = true
   }
