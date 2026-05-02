@@ -31,7 +31,6 @@ terraform {
     bucket         = "gg-lambda-deployments"
     key            = "gg-encryptionservice/terraform.tfstate"
     region         = "us-east-2"
-    dynamodb_table = "terraform-locks"
     encrypt        = true
   }
 }
