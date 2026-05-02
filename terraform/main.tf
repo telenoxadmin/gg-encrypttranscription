@@ -128,33 +128,6 @@ resource "aws_kms_alias" "main" {
 }
 
 # ════════════════════════════════════════════════════════════
-#  S3 ACCESS LOG BUCKET  (receives logs from all 3 data buckets)
-# ════════════════════════════════════════════════════════════
-
-resource "aws_s3_bucket" "access_logs" {
-  bucket        = "${local.prefix}-access-logs"
-  force_destroy = false
-  tags          = local.tags
-}
-
-resource "aws_s3_bucket_public_access_block" "access_logs" {
-  bucket                  = aws_s3_bucket.access_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
-  bucket = aws_s3_bucket.access_logs.id
-  rule {
-    id     = "expire-logs"
-    status = "Enabled"
-    expiration { days = 365 }
-  }
-}
-
-# ════════════════════════════════════════════════════════════
 #  S3 HELPER MODULE (applied to all 3 data buckets)
 # ════════════════════════════════════════════════════════════
 
@@ -189,15 +162,9 @@ resource "aws_s3_bucket_public_access_block" "input" {
   restrict_public_buckets = true
 }
 
-resource "aws_s3_bucket_logging" "input" {
-  bucket        = aws_s3_bucket.input.id
-  target_bucket = aws_s3_bucket.access_logs.id
-  target_prefix = "input/"
-}
-
 # ── OUTPUT BUCKET ─────────────────────────────────────────────
 resource "aws_s3_bucket" "output" {
-  bucket        = "${local.prefix}-output"
+  bucket        = "gg-transcriptions-en"
   force_destroy = false
   tags          = local.tags
 }
@@ -221,15 +188,9 @@ resource "aws_s3_bucket_public_access_block" "output" {
   restrict_public_buckets = true
 }
 
-resource "aws_s3_bucket_logging" "output" {
-  bucket        = aws_s3_bucket.output.id
-  target_bucket = aws_s3_bucket.access_logs.id
-  target_prefix = "output/"
-}
-
 # ── TOKEN MAP BUCKET  (most sensitive — separate from redacted files) ─────────
 resource "aws_s3_bucket" "token_map" {
-  bucket        = "${local.prefix}-token-map"
+  bucket        = "gg-convertmap"
   force_destroy = false
   tags          = merge(local.tags, { Sensitivity = "high" })
 }
@@ -251,12 +212,6 @@ resource "aws_s3_bucket_public_access_block" "token_map" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_logging" "token_map" {
-  bucket        = aws_s3_bucket.token_map.id
-  target_bucket = aws_s3_bucket.access_logs.id
-  target_prefix = "token-map/"
 }
 
 # ════════════════════════════════════════════════════════════
