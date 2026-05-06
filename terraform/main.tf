@@ -162,7 +162,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "input" {
       kms_master_key_id = aws_kms_key.main.arn
     }
     bucket_key_enabled = true
-
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "input" {
