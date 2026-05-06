@@ -220,17 +220,38 @@ def _process_record(record, redactor):
 
 
 def lambda_handler(event, context):
+    records = event.get("Records", [])
+    logger.info(json.dumps({
+        "action": "event_received",
+        "record_count": len(records),
+        "request_id": getattr(context, "aws_request_id", None),
+        "event_sources": sorted({r.get("eventSource", "unknown") for r in records}),
+        "keys": [
+            unquote_plus(r.get("s3", {}).get("object", {}).get("key", ""))
+            for r in records
+        ],
+    }))
+
     # Load models on first invocation (inside handler, not at module level)
     redactor = get_redactor()
     results  = []
 
-    for record in event.get("Records", []):
+    for record in records:
+        event_name = record.get("eventName", "unknown")
+        src_bucket = record.get("s3", {}).get("bucket", {}).get("name", "unknown")
+        src_key    = unquote_plus(record.get("s3", {}).get("object", {}).get("key", "unknown"))
+        logger.info(json.dumps({
+            "action": "event_record",
+            "event_name": event_name,
+            "bucket": src_bucket,
+            "key": src_key,
+        }))
+
         try:
             results.append(_process_record(record, redactor))
         except Exception as e:
-            key = unquote_plus(record.get("s3", {}).get("object", {}).get("key", "unknown"))
-            logger.error(json.dumps({"action": "error", "key": key, "error": str(e)}))
-            results.append({"source": key, "status": "error", "error": str(e)})
+            logger.error(json.dumps({"action": "error", "key": src_key, "error": str(e)}))
+            results.append({"source": src_key, "status": "error", "error": str(e)})
             raise  # triggers DLQ
 
     return {"statusCode": 200, "body": json.dumps(results)}
