@@ -52,6 +52,19 @@ variable "max_file_mb"      { default = "50" }
 variable "log_retention_days"      { default = 90 }
 variable "provisioned_concurrency"  { default = 0 }   # set to 1 to keep Lambda warm
 
+# Input bucket where hotel transcripts are dropped (key pattern: <HotelCode>/YYYY/MM/DD/<Agent>/Audio/*.txt)
+variable "input_bucket_name" { default = "gg-transcriptions" }
+
+# Postgres connection (DB must be reachable from the Lambda VPC/subnets)
+variable "db_host"     { default = "" }
+variable "db_port"     { default = "5432" }
+variable "db_name"     { default = "" }
+variable "db_user"     { default = "" }
+variable "db_password" {
+  default   = ""
+  sensitive = true
+}
+
 locals {
   prefix = "${var.project_name}-${var.environment}"
   tags   = {
@@ -133,7 +146,7 @@ resource "aws_kms_alias" "main" {
 
 # ── INPUT BUCKET ─────────────────────────────────────────────
 data "aws_s3_bucket" "input" {
-  bucket = "${local.prefix}-input"
+  bucket = var.input_bucket_name
 }
 
 resource "aws_s3_bucket_versioning" "input" {
@@ -149,7 +162,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "input" {
       kms_master_key_id = aws_kms_key.main.arn
     }
     bucket_key_enabled = true
-  }
+
 }
 
 resource "aws_s3_bucket_public_access_block" "input" {
@@ -492,6 +505,11 @@ resource "aws_lambda_function" "redactor" {
       MODE                 = var.mode
       CONFIDENCE_THRESHOLD = var.confidence
       MAX_FILE_MB          = var.max_file_mb
+      DB_HOST              = var.db_host
+      DB_PORT              = var.db_port
+      DB_NAME              = var.db_name
+      DB_USER              = var.db_user
+      DB_PASSWORD          = var.db_password
     }
   }
 

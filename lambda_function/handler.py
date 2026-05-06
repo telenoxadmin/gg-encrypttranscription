@@ -12,9 +12,11 @@ Cold start fix:
 
 import os
 import json
+import time
 import hashlib
 import logging
 import boto3
+import psycopg2
 from urllib.parse import unquote_plus
 from botocore.exceptions import ClientError
 
@@ -36,6 +38,62 @@ MODE             = os.environ.get("MODE", "redact")
 CONFIDENCE       = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.6"))
 MAX_FILE_BYTES   = int(os.environ.get("MAX_FILE_MB", "50")) * 1024 * 1024
 
+# Postgres connection (HotelDetails.IsEncryptionEnabled gating)
+DB_HOST     = os.environ.get("DB_HOST", "").strip()
+DB_PORT     = int(os.environ.get("DB_PORT", "5432"))
+DB_NAME     = os.environ.get("DB_NAME", "").strip()
+DB_USER     = os.environ.get("DB_USER", "").strip()
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+
+# In-memory cache: { hotel_code: (is_enabled: bool, expires_at: float) }
+_HOTEL_CACHE = {}
+_HOTEL_CACHE_TTL = 300  # seconds
+
+
+def _is_hotel_encryption_enabled(hotel_code):
+    """
+    Look up HotelDetails.IsEncryptionEnabled for the given HotelCode.
+    Cached for _HOTEL_CACHE_TTL seconds per cold container.
+    Returns False on any DB error (fail-closed: do not process if we can't verify).
+    """
+    now = time.time()
+    cached = _HOTEL_CACHE.get(hotel_code)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    if not (DB_HOST and DB_NAME and DB_USER):
+        logger.error(json.dumps({"action": "db_config_missing", "hotel": hotel_code}))
+        return False
+
+    try:
+        with psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+            user=DB_USER, password=DB_PASSWORD,
+            connect_timeout=5,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT "IsAnonymization" FROM "HotelDetails" WHERE "ggHotelId" = %s LIMIT 1',
+                    (hotel_code,),
+                )
+                row = cur.fetchone()
+        enabled = bool(row[0]) if row else False
+        _HOTEL_CACHE[hotel_code] = (enabled, now + _HOTEL_CACHE_TTL)
+        return enabled
+    except Exception as e:
+        logger.error(json.dumps({
+            "action": "db_lookup_failed",
+            "hotel": hotel_code,
+            "error": str(e),
+        }))
+        return False
+
+
+def _hotel_code_from_key(src_key):
+    """Extract HotelCode = first path segment of the S3 key."""
+    parts = src_key.split("/", 1)
+    return parts[0] if parts and parts[0] else None
+
 # ── Lazy singleton — models load on FIRST invocation, not at import ───────────
 # This avoids the Lambda init phase timing out before models finish loading.
 # Lambda allows up to timeout seconds for the handler to complete,
@@ -46,7 +104,6 @@ _redactor = None
 def get_redactor():
     global _redactor
     if _redactor is None:
-        import time
         t0 = time.time()
         logger.info(json.dumps({"action": "model_load_start", "mode": MODE}))
 
@@ -98,6 +155,19 @@ def _process_record(record, redactor):
     file_size  = record["s3"]["object"].get("size", 0)
 
     logger.info(json.dumps({"action": "start", "key": src_key, "bytes": file_size}))
+
+    # Guard: hotel must be enabled for encryption (HotelDetails.IsEncryptionEnabled)
+    hotel_code = _hotel_code_from_key(src_key)
+    if not hotel_code:
+        logger.warning(json.dumps({"action": "skip", "key": src_key, "reason": "no_hotel_code"}))
+        return {"source": src_key, "status": "skipped", "reason": "no_hotel_code"}
+
+    if not _is_hotel_encryption_enabled(hotel_code):
+        logger.info(json.dumps({
+            "action": "skip", "key": src_key, "hotel": hotel_code,
+            "reason": "encryption_disabled",
+        }))
+        return {"source": src_key, "status": "skipped", "reason": "encryption_disabled"}
 
     # Guard: file size
     if file_size > MAX_FILE_BYTES:
