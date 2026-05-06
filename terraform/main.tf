@@ -618,3 +618,4 @@ output "ecr_repo_url"      { value = aws_ecr_repository.lambda_repo.repository_u
 output "lambda_function"   { value = aws_lambda_function.redactor.function_name }
 output "dlq_url"           { value = aws_sqs_queue.dlq.url }
 output "kms_key_arn"       { value = aws_kms_key.main.arn }
+
