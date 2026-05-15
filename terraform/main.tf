@@ -252,113 +252,11 @@ resource "aws_ecr_lifecycle_policy" "lambda_repo" {
 }
 
 # ════════════════════════════════════════════════════════════
-#  VPC  (Lambda runs in private subnet — no internet exposure)
+#  (Lambda runs OUTSIDE any VPC — uses AWS-managed network)
 # ════════════════════════════════════════════════════════════
-
-resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = merge(local.tags, { Name = "${local.prefix}-vpc" })
-}
-
-resource "aws_subnet" "private" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet("10.0.0.0/16", 8, count.index)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-  tags              = merge(local.tags, { Name = "${local.prefix}-private-${count.index}" })
-}
-
-data "aws_availability_zones" "available" { state = "available" }
-
-resource "aws_security_group" "lambda_sg" {
-  name        = "${local.prefix}-lambda-sg"
-  description = "Lambda egress to AWS services via VPC endpoints only"
-  vpc_id      = aws_vpc.main.id
-
-  # No inbound — Lambda is triggered by events, not HTTP
-  egress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS to AWS APIs (via VPC endpoints)"
-  }
-
-  tags = local.tags
-}
-
-# Security group attached to Interface VPC endpoints — allows the Lambda
-# security group to reach the endpoint ENIs on 443.
-resource "aws_security_group" "vpce_sg" {
-  name        = "${local.prefix}-vpce-sg"
-  description = "Allow Lambda SG to reach Interface VPC endpoints"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.lambda_sg.id]
-    description     = "HTTPS from Lambda"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = local.tags
-}
-
-# ════════════════════════════════════════════════════════════
-#  VPC ENDPOINTS  (Lambda has no NAT — must reach AWS via endpoints)
-# ════════════════════════════════════════════════════════════
-
-# Route table for private subnets — required for the S3 Gateway endpoint.
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-  tags   = merge(local.tags, { Name = "${local.prefix}-private-rt" })
-}
-
-resource "aws_route_table_association" "private" {
-  count          = length(aws_subnet.private)
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
-}
-
-# S3 — Gateway endpoint (free, attaches to route table)
-resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${var.aws_region}.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.private.id]
-  tags              = local.tags
-}
-
-# Interface endpoints — KMS, SQS, CloudWatch Logs.
-# (ECR endpoints are NOT needed: Lambda service pulls images, not the function ENI.)
-locals {
-  interface_endpoints = toset([
-    "kms",
-    "sqs",
-    "logs",
-  ])
-}
-
-resource "aws_vpc_endpoint" "interface" {
-  for_each            = local.interface_endpoints
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.${each.key}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpce_sg.id]
-  private_dns_enabled = true
-  tags                = merge(local.tags, { Name = "${local.prefix}-vpce-${each.key}" })
-}
+# Note: Lambda has no VPC config. It can reach AWS services and any
+# publicly-accessible endpoint (incl. RDS only if PubliclyAccessible=true
+# and the RDS SG allows the Lambda egress IP range).
 
 # ════════════════════════════════════════════════════════════
 #  SQS DEAD-LETTER QUEUE
@@ -394,11 +292,6 @@ resource "aws_iam_role" "lambda_role" {
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_vpc" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 data "aws_iam_policy_document" "lambda_permissions" {
@@ -489,11 +382,6 @@ resource "aws_lambda_function" "redactor" {
   timeout                        = 600    # 10 min — covers cold start (30s) + large files
   reserved_concurrent_executions = var.max_concurrency  # prevents runaway parallelism
 
-  vpc_config {
-    subnet_ids         = aws_subnet.private[*].id
-    security_group_ids = [aws_security_group.lambda_sg.id]
-  }
-
   dead_letter_config {
     target_arn = aws_sqs_queue.dlq.arn
   }
@@ -516,7 +404,6 @@ resource "aws_lambda_function" "redactor" {
   depends_on = [
     aws_cloudwatch_log_group.lambda_logs,
     aws_iam_role_policy_attachment.lambda_basic,
-    aws_iam_role_policy_attachment.lambda_vpc,
   ]
 
   # The image_uri is owned by the deploy pipeline (deploy.sh runs

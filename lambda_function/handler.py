@@ -73,7 +73,7 @@ def _is_hotel_encryption_enabled(hotel_code):
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    'SELECT "IsAnonymization" FROM "HotelDetails" WHERE "ggHotelId" = %s LIMIT 1',
+                    'SELECT "IsAnonymization" FROM "public.hoteldetails" WHERE "ggHotelId" = %s LIMIT 1',
                     (hotel_code,),
                 )
                 row = cur.fetchone()
