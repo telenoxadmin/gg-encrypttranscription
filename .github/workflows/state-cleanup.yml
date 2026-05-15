@@ -1,0 +1,82 @@
+name: One-shot Terraform state cleanup (remove VPC resources)
+
+# Manual-only. Run once, then delete this file.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "REMOVE" to confirm. This forgets VPC resources from Terraform state (does NOT delete AWS resources).'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-prod        # share the deploy lock so this can't race with a deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-2
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  state-rm:
+    if: ${{ github.event.inputs.confirm == 'REMOVE' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Terraform init
+        working-directory: terraform
+        run: terraform init -input=false -reconfigure
+
+      - name: Show full state (before)
+        working-directory: terraform
+        run: terraform state list
+
+      - name: Remove VPC-related resources from state
+        working-directory: terraform
+        run: |
+          set -eo pipefail
+
+          # Collect every address Terraform still tracks that belongs to the
+          # old VPC / endpoint / SG / route-table block (and the lambda_vpc IAM
+          # attachment). Patterns match optional index suffixes like [0] / ["kms"].
+          mapfile -t ADDRS < <(
+            terraform state list | grep -E '^(aws_vpc\.main$|aws_subnet\.private(\[[0-9]+\])?$|aws_security_group\.(lambda_sg|vpce_sg)$|aws_route_table\.private$|aws_route_table_association\.private(\[[0-9]+\])?$|aws_vpc_endpoint\.s3$|aws_vpc_endpoint\.interface(\["[a-z0-9]+"\])?$|aws_iam_role_policy_attachment\.lambda_vpc$|data\.aws_availability_zones\.available$)' || true
+          )
+
+          if [ "${#ADDRS[@]}" -eq 0 ]; then
+            echo "No matching addresses found in state. Nothing to remove."
+            exit 0
+          fi
+
+          echo "Will remove ${#ADDRS[@]} address(es) from state:"
+          printf '  %s\n' "${ADDRS[@]}"
+
+          # `terraform state rm` accepts multiple addresses in one call.
+          terraform state rm "${ADDRS[@]}"
+
+      - name: Show full state (after)
+        working-directory: terraform
+        run: terraform state list
+
+      - name: Reminder
+        run: |
+          echo "::notice::State cleanup complete. The orphaned AWS resources (VPC, subnets, SGs, endpoints) still exist in AWS — delete them manually when convenient. Interface VPC endpoints continue to incur ~$7/month each until removed."
