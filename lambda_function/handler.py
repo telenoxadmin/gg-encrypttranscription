@@ -65,6 +65,17 @@ def _is_hotel_encryption_enabled(hotel_code):
         logger.error(json.dumps({"action": "db_config_missing", "hotel": hotel_code}))
         return False
 
+    # Log connection target (never log the password)
+    logger.info(json.dumps({
+        "action": "db_connect",
+        "hotel": hotel_code,
+        "host": DB_HOST,
+        "port": DB_PORT,
+        "dbname": DB_NAME,
+        "user": DB_USER,
+        "conn_string": f"postgresql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+    }))
+
     try:
         with psycopg2.connect(
             host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
